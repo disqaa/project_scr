@@ -2,12 +2,7 @@ from api.bybit_client import get_klines, get_usdt_symbols
 
 
 def check_volume_anomaly(multiplier: float, interval: str, lookback: int = 10, symbols_limit: int = 40):
-    """
-    Ищет монеты с аномально высоким объёмом торгов.
-    multiplier: во сколько раз объём должен превышать среднее, например 3.0
-    interval: интервал свечи
-    lookback: сколько предыдущих свечей использовать для расчёта среднего
-    """
+
     symbols = get_usdt_symbols(symbols_limit)
     alerts = []
 

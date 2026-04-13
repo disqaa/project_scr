@@ -2,10 +2,7 @@ from api.bybit_client import get_all_funding_rates
 
 
 def check_funding_rate(threshold: float):
-    """
-    Ищет монеты с экстремальной ставкой фандинга.
-    threshold: минимальная ставка по модулю (десятичная дробь), например 0.001 = 0.1%
-    """
+
     rates = get_all_funding_rates()
     alerts = []
 

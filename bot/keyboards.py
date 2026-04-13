@@ -1,6 +1,6 @@
 from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 
-# ─── Reply-клавиатуры (всегда внизу экрана) ─────────────────────────────────
+#Reply-клавиатуры
 
 def auth_keyboard():
     return ReplyKeyboardMarkup(
@@ -61,7 +61,7 @@ def back_to_main_keyboard():
     )
 
 
-# ─── Inline-клавиатуры (только для выбора конфигов) ─────────────────────────
+#Inline-клавиатуры
 
 SCREENER_EMOJI = {
     "price_spike": "📈",

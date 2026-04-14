@@ -15,4 +15,6 @@
     SAVE_CONFIG_NAME,
     MY_CONFIGS,
     DELETE_CONFIG,
-) = range(16)
+    ORDERBOOK_MIN_SIZE,
+    ORDERBOOK_DISTANCE
+) = range(18)

@@ -1,6 +1,5 @@
 from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 
-#Reply-клавиатуры
 
 def auth_keyboard():
     return ReplyKeyboardMarkup(
@@ -24,7 +23,7 @@ def screener_type_keyboard():
     return ReplyKeyboardMarkup(
         [
             ["📈 Price Spike"],
-            ["📊 Volume Anomaly"],
+            ["📖 Order Book Walls"],
             ["💰 Funding Rate"],
             ["◀️ Главное меню"]
         ],
@@ -61,11 +60,9 @@ def back_to_main_keyboard():
     )
 
 
-#Inline-клавиатуры
-
 SCREENER_EMOJI = {
     "price_spike": "📈",
-    "volume_anomaly": "📊",
+    "orderbook": "📖",
     "funding_rate": "💰"
 }
 
@@ -81,7 +78,6 @@ INTERVAL_LABELS = {
 
 
 def configs_inline_keyboard(configs_data: list):
-    """configs_data: список (id, name, screener_type)"""
     keyboard = []
     for cid, name, stype in configs_data:
         emoji = SCREENER_EMOJI.get(stype, "🔍")

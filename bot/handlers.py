@@ -15,17 +15,12 @@ from db.database import get_db
 from db.models import User, ScreenerConfig
 from screeners.funding_rate import check_funding_rate
 from screeners.price_spike import check_price_spike
-from screeners.volume_anomaly import check_volume_anomaly
+from screeners.orderbook import check_orderbook_walls
 
 logger = logging.getLogger(__name__)
 
-# Активные задачи
 active_jobs: dict = {}
-
-# Временные конфиги в процессе настройки
 temp_configs: dict = {}
-
-# Авторизованные пользователи
 auth_users: dict = {}
 
 INTERVAL_TO_SECONDS = {
@@ -34,13 +29,13 @@ INTERVAL_TO_SECONDS = {
 }
 
 
-#Хэширование пароля
+# хэш пароля
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 
-#БД
+# бд — пользователи
 
 def db_register_user(telegram_id: int, login: str, password: str, first_name: str):
     db = get_db()
@@ -127,12 +122,7 @@ def remove_active_job(telegram_id: int):
         del active_jobs[telegram_id]
 
 
-async def go_main_menu(update: Update, text: str = "Выбери действие:"):
-    await update.message.reply_text(text, reply_markup=main_menu_keyboard())
-    return MAIN_MENU
-
-
-#start
+# /start
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -145,9 +135,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "👋 Добро пожаловать в *Crypto Screener Bot*!\n\n"
-        "Бот отслеживает крипторынок на Bybit и присылает сигналы:\n"
+        "Бот отслеживает крипторынок на Bybit:\n"
         "• 📈 Резкие изменения цены\n"
-        "• 📊 Аномальные объёмы торгов\n"
+        "• 📖 Крупные заявки в стакане\n"
         "• 💰 Экстремальные ставки фандинга\n\n"
         "Для начала нужно войти или зарегистрироваться:",
         reply_markup=auth_keyboard(),
@@ -156,14 +146,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return AUTH_CHOOSE
 
 
-#Регистрация
+# регистрация
 
 async def auth_choose_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     if text == "📝 Регистрация":
         await update.message.reply_text(
-            "📝 *Регистрация*\n\nПридумай логин (только буквы и цифры, до 30 символов):",
+            "📝 *Регистрация*\n\nПридумай логин (только буквы и цифры, 3–30 символов):",
             reply_markup=back_to_main_keyboard(),
             parse_mode="Markdown"
         )
@@ -230,14 +220,14 @@ async def register_password_handler(update: Update, context: ContextTypes.DEFAUL
 
     auth_users[tid] = user_id
     await update.message.reply_text(
-        f"🎉 Регистрация успешна!\n\nДобро пожаловать, *{login}*!\nВыбери действие:",
+        f"🎉 Регистрация успешна! Добро пожаловать, *{login}*!\n\nВыбери действие:",
         reply_markup=main_menu_keyboard(),
         parse_mode="Markdown"
     )
     return MAIN_MENU
 
 
-#Авторизация
+# авторизация
 
 async def login_login_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -283,7 +273,7 @@ async def login_password_handler(update: Update, context: ContextTypes.DEFAULT_T
     return MAIN_MENU
 
 
-#Главное меню
+#  главное меню
 
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -296,9 +286,9 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🔍 Запустить скринер":
         await update.message.reply_text(
             "🔍 *Выбери тип скринера:*\n\n"
-            "📈 *Price Spike* — резкое изменение цены\n"
-            "📊 *Volume Anomaly* — аномальный объём торгов\n"
-            "💰 *Funding Rate* — экстремальный фандинг",
+            "📈 *Price Spike* — резкое изменение цены фьючерса\n"
+            "📖 *Order Book Walls* — крупные заявки в спот стакане\n"
+            "💰 *Funding Rate* — экстремальный фандинг фьючерсов",
             reply_markup=screener_type_keyboard(),
             parse_mode="Markdown"
         )
@@ -315,20 +305,20 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=main_menu_keyboard()
             )
         else:
-            await update.message.reply_text(
-                "⚠️ Нет активного скринера.",
-                reply_markup=main_menu_keyboard()
-            )
+            await update.message.reply_text("⚠️ Нет активного скринера.", reply_markup=main_menu_keyboard())
         return MAIN_MENU
 
     elif text == "ℹ️ Помощь":
         await update.message.reply_text(
             "ℹ️ *Справка*\n\n"
-            "*📈 Price Spike* — находит монеты с резким ростом или падением цены за выбранный интервал свечи.\n\n"
-            "*📊 Volume Anomaly* — находит монеты, объём торгов которых в N раз превышает средний.\n\n"
-            "*💰 Funding Rate* — находит фьючерсы с экстремальной ставкой фандинга (перегрев рынка).\n\n"
-            "*💾 Конфиги* — сохраняй настройки скринера и быстро запускай их снова.\n\n"
-            "Используй кнопки внизу экрана для навигации.",
+            "*📈 Price Spike* — мониторит фьючерсный рынок. Присылает сигнал когда цена "
+            "резко меняется за выбранный интервал свечи.\n\n"
+            "*📖 Order Book Walls* — мониторит спот стакан. Присылает сигнал когда "
+            "находит крупную заявку рядом с текущей ценой. Ты сам задаёшь минимальный "
+            "размер заявки в USDT и максимальное расстояние до неё в процентах.\n\n"
+            "*💰 Funding Rate* — присылает сигнал когда ставка фандинга фьючерса "
+            "превышает заданный порог. Высокий фандинг говорит о перегреве рынка.\n\n"
+            "Конфиги сохраняются в базе данных и привязаны к твоему аккаунту.",
             reply_markup=main_menu_keyboard(),
             parse_mode="Markdown"
         )
@@ -338,10 +328,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remove_active_job(tid)
         auth_users.pop(tid, None)
         temp_configs.pop(tid, None)
-        await update.message.reply_text(
-            "🚪 Ты вышел из аккаунта.",
-            reply_markup=auth_keyboard()
-        )
+        await update.message.reply_text("🚪 Ты вышел из аккаунта.", reply_markup=auth_keyboard())
         return AUTH_CHOOSE
 
     else:
@@ -349,7 +336,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
 
 
-#Выбор скринера
+#выбор скринера
 
 async def choose_screener_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -370,16 +357,16 @@ async def choose_screener_handler(update: Update, context: ContextTypes.DEFAULT_
         )
         return PRICE_SPIKE_THRESHOLD
 
-    elif text == "📊 Volume Anomaly":
-        temp_configs[tid] = {"type": "volume_anomaly"}
+    elif text == "📖 Order Book Walls":
+        temp_configs[tid] = {"type": "orderbook"}
         await update.message.reply_text(
-            "📊 *Volume Anomaly Screener*\n\n"
-            "Введи множитель — во сколько раз текущий объём должен превышать средний.\n"
-            "Например: `3` — сигнал когда объём в 3 раза выше нормы.",
+            "📖 *Order Book Walls Screener*\n\n"
+            "Введи минимальный размер заявки в USDT.\n"
+            "Например: `500000` — искать заявки от 500 тысяч USDT и выше.",
             reply_markup=back_to_main_keyboard(),
             parse_mode="Markdown"
         )
-        return VOLUME_MULTIPLIER
+        return ORDERBOOK_MIN_SIZE
 
     elif text == "💰 Funding Rate":
         temp_configs[tid] = {"type": "funding_rate"}
@@ -399,7 +386,7 @@ async def choose_screener_handler(update: Update, context: ContextTypes.DEFAULT_
         return CHOOSE_SCREENER
 
 
-#Price Spike
+# price spike
 
 async def price_spike_threshold_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -453,9 +440,47 @@ async def price_spike_interval_handler(update: Update, context: ContextTypes.DEF
     return SAVE_OR_RUN
 
 
-#Volume Anomaly
+#order book walls
 
-async def volume_multiplier_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def orderbook_min_size_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    text = update.message.text.strip()
+
+    if text == "◀️ Главное меню":
+        await update.message.reply_text("Выбери действие:", reply_markup=main_menu_keyboard())
+        return MAIN_MENU
+
+    try:
+        # убираем пробелы на случай если пользователь написал "500 000"
+        val = float(text.replace(" ", "").replace(",", "."))
+        if val <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Введи положительное число. Например: `500000` или `1000000`",
+            parse_mode="Markdown"
+        )
+        return ORDERBOOK_MIN_SIZE
+
+    temp_configs[tid]["min_size_usdt"] = val
+
+    # форматируем красиво для отображения
+    if val >= 1_000_000:
+        size_label = f"{val / 1_000_000:.1f}M"
+    else:
+        size_label = f"{val / 1_000:.0f}K"
+
+    await update.message.reply_text(
+        f"✅ Минимальный размер заявки: *{size_label} USDT*\n\n"
+        f"Теперь введи максимальное расстояние от текущей цены до заявки в процентах.\n"
+        f"Например: `2` — искать заявки в пределах 2% от текущей цены.",
+        reply_markup=back_to_main_keyboard(),
+        parse_mode="Markdown"
+    )
+    return ORDERBOOK_DISTANCE
+
+
+async def orderbook_distance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     text = update.message.text.strip()
 
@@ -465,41 +490,29 @@ async def volume_multiplier_handler(update: Update, context: ContextTypes.DEFAUL
 
     try:
         val = float(text.replace(",", "."))
-        if val <= 1:
+        if val <= 0 or val > 50:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Введи число больше 1. Например: `3` или `5`", parse_mode="Markdown")
-        return VOLUME_MULTIPLIER
+        await update.message.reply_text(
+            "❌ Введи число от 0.1 до 50. Например: `2` или `1.5`",
+            parse_mode="Markdown"
+        )
+        return ORDERBOOK_DISTANCE
 
-    temp_configs[tid]["multiplier"] = val
-    await update.message.reply_text(
-        f"✅ Множитель: *{val}x*\n\nТеперь выбери интервал свечи:",
-        reply_markup=interval_keyboard(),
-        parse_mode="Markdown"
-    )
-    return VOLUME_INTERVAL
-
-
-async def volume_interval_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tid = update.effective_user.id
-    text = update.message.text
-
-    if text == "◀️ Главное меню":
-        await update.message.reply_text("Выбери действие:", reply_markup=main_menu_keyboard())
-        return MAIN_MENU
-
-    interval = INTERVAL_MAP.get(text)
-    if not interval:
-        await update.message.reply_text("Выбери интервал с помощью кнопок 👇", reply_markup=interval_keyboard())
-        return VOLUME_INTERVAL
-
-    temp_configs[tid]["interval"] = interval
+    temp_configs[tid]["max_distance_pct"] = val
     cfg = temp_configs[tid]
 
+    min_usdt = cfg["min_size_usdt"]
+    if min_usdt >= 1_000_000:
+        size_label = f"{min_usdt / 1_000_000:.1f}M"
+    else:
+        size_label = f"{min_usdt / 1_000:.0f}K"
+
     await update.message.reply_text(
-        f"📊 *Volume Anomaly Screener*\n\n"
-        f"Множитель объёма: *{cfg['multiplier']}x*\n"
-        f"Интервал свечи: *{text}*\n\n"
+        f"📖 *Order Book Walls Screener*\n\n"
+        f"Минимальный размер заявки: *{size_label} USDT*\n"
+        f"Максимальное расстояние до заявки: *{val}%*\n"
+        f"Проверка каждые 30 секунд\n\n"
         f"Что делаем?",
         reply_markup=save_or_run_keyboard(),
         parse_mode="Markdown"
@@ -507,7 +520,7 @@ async def volume_interval_handler(update: Update, context: ContextTypes.DEFAULT_
     return SAVE_OR_RUN
 
 
-#Funding Rate
+# funding rate
 
 async def funding_threshold_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -539,7 +552,7 @@ async def funding_threshold_handler(update: Update, context: ContextTypes.DEFAUL
     return SAVE_OR_RUN
 
 
-#Сохранение/Запуск
+#сохранение запуск
 
 async def save_or_run_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -564,7 +577,7 @@ async def save_or_run_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["saving_config"] = True
         await update.message.reply_text(
             "💾 Введи название для этого конфига:\n"
-            "Например: `Скальпинг 5%` или `Мониторинг объёмов`",
+            "Например: `BTC стакан 1M` или `Памп 5%`",
             reply_markup=back_to_main_keyboard(),
             parse_mode="Markdown"
         )
@@ -595,11 +608,7 @@ async def save_config_name_handler(update: Update, context: ContextTypes.DEFAULT
         return ConversationHandler.END
 
     db_save_config(user_db_id, text, cfg)
-
-    await update.message.reply_text(
-        f"✅ Конфиг *{text}* сохранён!",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"✅ Конфиг *{text}* сохранён!", parse_mode="Markdown")
     await launch_screener(tid, context, update.message.chat_id)
     await update.message.reply_text(
         "▶️ Скринер запущен! Сигналы будут приходить в этот чат.\n"
@@ -610,7 +619,7 @@ async def save_config_name_handler(update: Update, context: ContextTypes.DEFAULT
     return MAIN_MENU
 
 
-#Мои конфиги
+#мои конфиги
 
 async def show_my_configs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -652,10 +661,7 @@ async def my_configs_callback_handler(update: Update, context: ContextTypes.DEFA
 
     if data == "delete_menu":
         short = context.user_data.get("configs_short", [])
-        await query.edit_message_text(
-            "🗑 Выбери конфиг для удаления:",
-            reply_markup=delete_inline_keyboard(short)
-        )
+        await query.edit_message_text("🗑 Выбери конфиг для удаления:", reply_markup=delete_inline_keyboard(short))
         return MY_CONFIGS
 
     if data == "back_configs":
@@ -700,7 +706,7 @@ async def my_configs_callback_handler(update: Update, context: ContextTypes.DEFA
         return MAIN_MENU
 
 
-#Запуск скринера
+#запуск скринера
 
 async def launch_screener(telegram_id: int, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     remove_active_job(telegram_id)
@@ -708,7 +714,9 @@ async def launch_screener(telegram_id: int, context: ContextTypes.DEFAULT_TYPE, 
     screener_type = cfg.get("type", "price_spike")
 
     if screener_type == "funding_rate":
-        check_interval = 300
+        check_interval = 300        # каждые 5 минут
+    elif screener_type == "orderbook":
+        check_interval = 30         # каждые 30 секунд — стакан меняется быстро
     else:
         interval = cfg.get("interval", "5")
         check_interval = INTERVAL_TO_SECONDS.get(interval, 300)
@@ -731,44 +739,63 @@ async def screener_job(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if screener_type == "price_spike":
-            alerts = check_price_spike(cfg.get("threshold", 5.0), cfg.get("interval", "5"))
-            if not alerts:
-                return
-            text = "🚨 *Price Spike Alert!*\n\n"
-            for a in alerts[:5]:
-                text += (
-                    f"{a['direction']} *{a['symbol']}*\n"
-                    f"Изменение: `{a['pct_change']:+.2f}%`\n"
-                    f"Цена: `{a['current_price']}`\n\n"
-                )
+            interval = cfg.get("interval", "5")
+            interval_label = INTERVAL_LABELS.get(interval, f"{interval} мин")
+            alerts = check_price_spike(cfg.get("threshold", 5.0), interval)
 
-        elif screener_type == "volume_anomaly":
-            alerts = check_volume_anomaly(cfg.get("multiplier", 3.0), cfg.get("interval", "5"))
-            if not alerts:
-                return
-            text = "📊 *Volume Anomaly Alert!*\n\n"
+            # каждый токен — отдельное сообщение
             for a in alerts[:5]:
-                text += (
-                    f"🔥 *{a['symbol']}*\n"
-                    f"Объём в `{a['volume_ratio']}x` раз выше нормы\n"
-                    f"Цена: `{a['current_price']}`\n\n"
+                signal_line = "🟢 *PUMP*" if a["is_pump"] else "🔴 *DUMP*"
+                text = (
+                    f"{signal_line}\n"
+                    f"*{a['pair']}*\n\n"
+                    f"📊 Изменение: `{a['pct_change']:+.2f}%` за {interval_label}\n"
+                    f"💰 Цена: `{a['price_from']}` → `{a['price_to']}`"
                 )
+                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+
+        elif screener_type == "orderbook":
+            alerts = check_orderbook_walls(
+                min_size_usdt=cfg.get("min_size_usdt", 500_000),
+                max_distance_pct=cfg.get("max_distance_pct", 2.0)
+            )
+
+            # каждая найденная заявка — отдельное сообщение
+            for a in alerts[:5]:
+                # bid — заявка на покупку снизу, ask — заявка на продажу сверху
+                if a["side"] == "BID":
+                    side_line = "🟩 *BID WALL* (поддержка)"
+                else:
+                    side_line = "🟥 *ASK WALL* (сопротивление)"
+
+                # форматируем размер заявки
+                usdt = a["size_usdt"]
+                if usdt >= 1_000_000:
+                    size_label = f"{usdt / 1_000_000:.2f}M"
+                else:
+                    size_label = f"{usdt / 1_000:.1f}K"
+
+                text = (
+                    f"{side_line}\n"
+                    f"*{a['pair']}*\n\n"
+                    f"💰 Текущая цена: `{a['current_price']}`\n"
+                    f"🎯 Цена заявки: `{a['wall_price']}`\n"
+                    f"📏 Расстояние: `{a['distance_pct']}%`\n"
+                    f"📦 Размер заявки: `{size_label} USDT`"
+                )
+                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
         elif screener_type == "funding_rate":
             alerts = check_funding_rate(cfg.get("threshold", 0.001))
-            if not alerts:
-                return
-            text = "💰 *Funding Rate Alert!*\n\n"
-            for a in alerts[:5]:
-                text += (
-                    f"*{a['symbol']}*\n"
-                    f"Ставка: `{a['funding_rate_pct']:+.4f}%`\n"
-                    f"{a['direction']}\n\n"
-                )
-        else:
-            return
 
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+            for a in alerts[:5]:
+                text = (
+                    f"💰 *FUNDING RATE ALERT*\n"
+                    f"*{a['pair']}*\n\n"
+                    f"📈 Ставка: `{a['funding_rate_pct']:+.4f}%`\n"
+                    f"ℹ️ {a['direction']}"
+                )
+                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"Ошибка в screener_job: {e}")
+        logger.error(f"ошибка в screener_job: {e}")

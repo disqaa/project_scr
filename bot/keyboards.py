@@ -1,5 +1,27 @@
 from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 
+SCREENER_EMOJI = {
+    "price_spike": "📈",
+    "orderbook": "📖",
+    "funding_rate": "💰"
+}
+
+SCREENER_NAMES = {
+    "price_spike": "Price Spike",
+    "orderbook": "Order Book Walls",
+    "funding_rate": "Funding Rate"
+}
+
+INTERVAL_MAP = {
+    "1 мин": "1", "3 мин": "3", "5 мин": "5",
+    "15 мин": "15", "30 мин": "30", "1 час": "60"
+}
+
+INTERVAL_LABELS = {
+    "1": "1 мин", "3": "3 мин", "5": "5 мин",
+    "15": "15 мин", "30": "30 мин", "60": "1 час"
+}
+
 
 def auth_keyboard():
     return ReplyKeyboardMarkup(
@@ -12,7 +34,7 @@ def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
             ["🔍 Запустить скринер", "📋 Мои конфиги"],
-            ["🛑 Остановить скринер", "ℹ️ Помощь"],
+            ["📊 Активные скринеры", "ℹ️ Помощь"],
             ["🚪 Выйти из аккаунта"]
         ],
         resize_keyboard=True
@@ -60,23 +82,6 @@ def back_to_main_keyboard():
     )
 
 
-SCREENER_EMOJI = {
-    "price_spike": "📈",
-    "orderbook": "📖",
-    "funding_rate": "💰"
-}
-
-INTERVAL_MAP = {
-    "1 мин": "1", "3 мин": "3", "5 мин": "5",
-    "15 мин": "15", "30 мин": "30", "1 час": "60"
-}
-
-INTERVAL_LABELS = {
-    "1": "1 мин", "3": "3 мин", "5": "5 мин",
-    "15": "15 мин", "30": "30 мин", "60": "1 час"
-}
-
-
 def configs_inline_keyboard(configs_data: list):
     keyboard = []
     for cid, name, stype in configs_data:
@@ -91,4 +96,36 @@ def delete_inline_keyboard(configs_data: list):
     for cid, name, stype in configs_data:
         keyboard.append([InlineKeyboardButton(f"🗑 {name}", callback_data=f"del_{cid}")])
     keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_configs")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def manage_screeners_inline_keyboard(active: dict):
+    """
+    active — словарь активных скринеров пользователя
+    {screener_type: job}, например {"price_spike": job}
+    """
+    keyboard = []
+
+    all_types = ["price_spike", "orderbook", "funding_rate"]
+    for stype in all_types:
+        emoji = SCREENER_EMOJI[stype]
+        name = SCREENER_NAMES[stype]
+        if stype in active:
+            # скринер запущен — кнопка останавливает его
+            keyboard.append([InlineKeyboardButton(
+                f"🔴 Стоп {emoji} {name}",
+                callback_data=f"stop_{stype}"
+            )])
+        else:
+            # скринер не запущен — показываем статус
+            keyboard.append([InlineKeyboardButton(
+                f"⚪ {emoji} {name} — не запущен",
+                callback_data="noop"
+            )])
+
+    # кнопка остановить всё — только если есть хоть один активный
+    if active:
+        keyboard.append([InlineKeyboardButton("🛑 Остановить все скринеры", callback_data="stop_all")])
+
+    keyboard.append([InlineKeyboardButton("✖️ Закрыть", callback_data="close_manage")])
     return InlineKeyboardMarkup(keyboard)

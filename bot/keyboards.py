@@ -100,10 +100,6 @@ def delete_inline_keyboard(configs_data: list):
 
 
 def manage_screeners_inline_keyboard(active: dict):
-    """
-    active — словарь активных скринеров пользователя
-    {screener_type: job}, например {"price_spike": job}
-    """
     keyboard = []
 
     all_types = ["price_spike", "orderbook", "funding_rate"]
@@ -123,7 +119,6 @@ def manage_screeners_inline_keyboard(active: dict):
                 callback_data="noop"
             )])
 
-    # кнопка остановить всё — только если есть хоть один активный
     if active:
         keyboard.append([InlineKeyboardButton("🛑 Остановить все скринеры", callback_data="stop_all")])
 

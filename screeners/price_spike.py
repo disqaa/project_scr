@@ -2,7 +2,6 @@ from api.bybit_client import get_klines, get_usdt_symbols
 
 
 def check_price_spike(threshold_pct: float, interval: str, symbols_limit: int = 40):
-    # берём топ символы по объёму торгов
     symbols = get_usdt_symbols(symbols_limit)
     alerts = []
 

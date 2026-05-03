@@ -12,6 +12,11 @@ SCREENER_NAMES = {
     "funding_rate": "Funding Rate"
 }
 
+EXCHANGE_EMOJI = {
+    "bybit": "🟡",
+    "bitget": "🔵"
+}
+
 INTERVAL_MAP = {
     "1 мин": "1", "3 мин": "3", "5 мин": "5",
     "15 мин": "15", "30 мин": "30", "1 час": "60"
@@ -36,6 +41,16 @@ def main_menu_keyboard():
             ["🔍 Запустить скринер", "📋 Мои конфиги"],
             ["📊 Активные скринеры", "ℹ️ Помощь"],
             ["🚪 Выйти из аккаунта"]
+        ],
+        resize_keyboard=True
+    )
+
+
+def exchange_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["🟡 Bybit", "🔵 Bitget"],
+            ["◀️ Главное меню"]
         ],
         resize_keyboard=True
     )
@@ -84,16 +99,20 @@ def back_to_main_keyboard():
 
 def configs_inline_keyboard(configs_data: list):
     keyboard = []
-    for cid, name, stype in configs_data:
+    for cid, name, stype, exchange in configs_data:
         emoji = SCREENER_EMOJI.get(stype, "🔍")
-        keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"load_{cid}")])
+        ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
+        keyboard.append([InlineKeyboardButton(
+            f"{emoji} {name} {ex_emoji}",
+            callback_data=f"load_{cid}"
+        )])
     keyboard.append([InlineKeyboardButton("🗑 Удалить конфиг", callback_data="delete_menu")])
     return InlineKeyboardMarkup(keyboard)
 
 
 def delete_inline_keyboard(configs_data: list):
     keyboard = []
-    for cid, name, stype in configs_data:
+    for cid, name, stype, exchange in configs_data:
         keyboard.append([InlineKeyboardButton(f"🗑 {name}", callback_data=f"del_{cid}")])
     keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_configs")])
     return InlineKeyboardMarkup(keyboard)
@@ -101,26 +120,23 @@ def delete_inline_keyboard(configs_data: list):
 
 def manage_screeners_inline_keyboard(active: dict):
     keyboard = []
-
     all_types = ["price_spike", "orderbook", "funding_rate"]
     for stype in all_types:
         emoji = SCREENER_EMOJI[stype]
         name = SCREENER_NAMES[stype]
         if stype in active:
-            # скринер запущен — кнопка останавливает его
+            exchange = active[stype].get("exchange", "bybit")
+            ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
             keyboard.append([InlineKeyboardButton(
-                f"🔴 Стоп {emoji} {name}",
+                f"🔴 Стоп {emoji} {name} {ex_emoji}",
                 callback_data=f"stop_{stype}"
             )])
         else:
-            # скринер не запущен — показываем статус
             keyboard.append([InlineKeyboardButton(
                 f"⚪ {emoji} {name} — не запущен",
                 callback_data="noop"
             )])
-
     if active:
         keyboard.append([InlineKeyboardButton("🛑 Остановить все скринеры", callback_data="stop_all")])
-
     keyboard.append([InlineKeyboardButton("✖️ Закрыть", callback_data="close_manage")])
     return InlineKeyboardMarkup(keyboard)

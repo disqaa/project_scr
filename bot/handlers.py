@@ -6,11 +6,12 @@ from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.keyboards import (
-    auth_keyboard, main_menu_keyboard, screener_type_keyboard,
-    interval_keyboard, save_or_run_keyboard, back_to_main_keyboard,
+    auth_keyboard, main_menu_keyboard, exchange_keyboard,
+    screener_type_keyboard, interval_keyboard,
+    save_or_run_keyboard, back_to_main_keyboard,
     configs_inline_keyboard, delete_inline_keyboard,
     manage_screeners_inline_keyboard,
-    INTERVAL_MAP, INTERVAL_LABELS, SCREENER_NAMES, SCREENER_EMOJI
+    INTERVAL_MAP, INTERVAL_LABELS, SCREENER_NAMES, SCREENER_EMOJI, EXCHANGE_EMOJI
 )
 from bot.states import *
 from db.database import get_db
@@ -19,20 +20,27 @@ from screeners.funding_rate import check_funding_rate
 from screeners.price_spike import check_price_spike
 from screeners.orderbook import fetch_orderbook_walls
 
+import api.bybit_client as bybit
+import api.bitget_client as bitget
+
 logger = logging.getLogger(__name__)
 
 active_jobs: dict = {}
-
 temp_configs: dict = {}
-
 auth_users: dict = {}
 
+# состояние стакана для orderbook скринера
 orderbook_known: dict = {}
 
 INTERVAL_TO_SECONDS = {
     "1": 60, "3": 180, "5": 300,
     "15": 900, "30": 1800, "60": 3600
 }
+
+
+def get_exchange_client(exchange: str):
+    # возвращает нужный модуль клиента по названию биржи
+    return bitget if exchange == "bitget" else bybit
 
 
 #хэш пароля
@@ -80,7 +88,11 @@ def db_get_configs(user_db_id: int):
     db = get_db()
     try:
         configs = db.query(ScreenerConfig).filter(ScreenerConfig.user_id == user_db_id).all()
-        return [(c.id, c.name, c.screener_type, c.params) for c in configs]
+        # возвращаем (id, name, screener_type, exchange, params)
+        return [
+            (c.id, c.name, c.screener_type, c.params.get("exchange", "bybit"), c.params)
+            for c in configs
+        ]
     finally:
         db.close()
 
@@ -128,7 +140,7 @@ def stop_one_screener(telegram_id: int, screener_type: str):
     jobs = active_jobs.get(telegram_id, {})
     if screener_type in jobs:
         try:
-            jobs[screener_type].schedule_removal()
+            jobs[screener_type]["job"].schedule_removal()
         except Exception:
             pass
         del jobs[screener_type]
@@ -140,9 +152,9 @@ def stop_one_screener(telegram_id: int, screener_type: str):
 
 def stop_all_screeners(telegram_id: int):
     jobs = active_jobs.get(telegram_id, {})
-    for job in jobs.values():
+    for info in jobs.values():
         try:
-            job.schedule_removal()
+            info["job"].schedule_removal()
         except Exception:
             pass
     active_jobs.pop(telegram_id, None)
@@ -154,10 +166,13 @@ def build_active_status_text(telegram_id: int) -> str:
     if not jobs:
         return "📊 *Активные скринеры*\n\nНет запущенных скринеров."
     lines = ["📊 *Активные скринеры:*\n"]
-    for stype in jobs:
+    for stype, info in jobs.items():
         emoji = SCREENER_EMOJI.get(stype, "🔍")
         name = SCREENER_NAMES.get(stype, stype)
-        lines.append(f"✅ {emoji} {name}")
+        exchange = info.get("exchange", "bybit")
+        ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
+        ex_name = exchange.capitalize()
+        lines.append(f"✅ {emoji} {name} {ex_emoji} {ex_name}")
     return "\n".join(lines)
 
 
@@ -173,12 +188,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
     await update.message.reply_text(
         "👋 Добро пожаловать в *Crypto Screener Bot*!\n\n"
-        "Бот отслеживает крипторынок на Bybit:\n"
+        "Бот отслеживает крипторынок и присылает сигналы:\n"
         "• 📈 Резкие изменения цены фьючерсов\n"
         "• 📖 Крупные заявки в спот стакане\n"
         "• 💰 Экстремальные ставки фандинга\n\n"
+        "Поддерживаемые биржи: 🟡 Bybit, 🔵 Bitget\n"
         "Можно запустить несколько скринеров одновременно.\n\n"
-        "Для начала нужно войти или зарегистрироваться:",
+        "Для начала войди или зарегистрируйся:",
         reply_markup=auth_keyboard(),
         parse_mode="Markdown"
     )
@@ -303,15 +319,13 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🔍 Запустить скринер":
         await update.message.reply_text(
-            "🔍 *Выбери тип скринера:*\n\n"
-            "📈 *Price Spike* — резкое изменение цены фьючерса\n"
-            "📖 *Order Book Walls* — крупные заявки в спот стакане\n"
-            "💰 *Funding Rate* — экстремальный фандинг фьючерсов\n\n"
-            "Можно запустить несколько скринеров одновременно.",
-            reply_markup=screener_type_keyboard(),
+            "🏦 *Выбери биржу:*\n\n"
+            "🟡 *Bybit*\n"
+            "🔵 *Bitget*",
+            reply_markup=exchange_keyboard(),
             parse_mode="Markdown"
         )
-        return CHOOSE_SCREENER
+        return CHOOSE_EXCHANGE
 
     elif text == "📊 Активные скринеры":
         jobs = get_user_jobs(tid)
@@ -332,10 +346,10 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "*📈 Price Spike* — мониторит фьючерсный рынок. Сигнал когда цена "
             "резко меняется за выбранный интервал свечи.\n\n"
             "*📖 Order Book Walls* — мониторит спот стакан. При запуске присылает "
-            "все крупные заявки в зоне. Потом присылает только новые заявки или "
-            "вернувшиеся в зону после ухода цены.\n\n"
+            "все крупные заявки в зоне, потом только новые.\n\n"
             "*💰 Funding Rate* — сигнал когда ставка фандинга фьючерса "
             "превышает заданный порог.\n\n"
+            "Биржи: 🟡 *Bybit* и 🔵 *Bitget* — выбираешь при настройке.\n\n"
             "Все скринеры работают одновременно. Управляй через *📊 Активные скринеры*.",
             reply_markup=main_menu_keyboard(),
             parse_mode="Markdown"
@@ -354,45 +368,39 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
 
 
-#управление активными скринерами
+#выбор биржи
 
-async def manage_screeners_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def choose_exchange_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
-    data = query.data
+    text = update.message.text
 
-    if data == "noop":
-        return MANAGE_SCREENERS
-
-    if data == "close_manage":
-        await query.delete_message()
+    if text == "◀️ Главное меню":
+        await update.message.reply_text("Выбери действие:", reply_markup=main_menu_keyboard())
         return MAIN_MENU
 
-    if data == "stop_all":
-        stop_all_screeners(tid)
-        await query.edit_message_text(
-            "🛑 *Все скринеры остановлены.*",
-            reply_markup=manage_screeners_inline_keyboard({}),
-            parse_mode="Markdown"
-        )
-        return MANAGE_SCREENERS
+    if text == "🟡 Bybit":
+        exchange = "bybit"
+    elif text == "🔵 Bitget":
+        exchange = "bitget"
+    else:
+        await update.message.reply_text("Выбери биржу с помощью кнопок 👇", reply_markup=exchange_keyboard())
+        return CHOOSE_EXCHANGE
 
-    if data.startswith("stop_"):
-        screener_type = data.replace("stop_", "")
-        stop_one_screener(tid, screener_type)
-        emoji = SCREENER_EMOJI.get(screener_type, "")
-        name = SCREENER_NAMES.get(screener_type, screener_type)
-        jobs = get_user_jobs(tid)
-        status_text = build_active_status_text(tid)
-        await query.edit_message_text(
-            f"🛑 {emoji} *{name}* остановлен.\n\n{status_text}",
-            reply_markup=manage_screeners_inline_keyboard(jobs),
-            parse_mode="Markdown"
-        )
-        return MANAGE_SCREENERS
+    # сохраняем выбранную биржу в temp_config
+    temp_configs[tid] = {"exchange": exchange}
+    ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
+    ex_name = exchange.capitalize()
 
-    return MANAGE_SCREENERS
+    await update.message.reply_text(
+        f"{ex_emoji} *{ex_name}* — выбрана!\n\n"
+        f"Теперь выбери тип скринера:\n\n"
+        f"📈 *Price Spike* — резкое изменение цены фьючерса\n"
+        f"📖 *Order Book Walls* — крупные заявки в спот стакане\n"
+        f"💰 *Funding Rate* — экстремальный фандинг фьючерсов",
+        reply_markup=screener_type_keyboard(),
+        parse_mode="Markdown"
+    )
+    return CHOOSE_SCREENER
 
 
 #выбор скринера
@@ -405,35 +413,39 @@ async def choose_screener_handler(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("Выбери действие:", reply_markup=main_menu_keyboard())
         return MAIN_MENU
 
+    # берём уже выбранную биржу из temp_config
+    exchange = temp_configs.get(tid, {}).get("exchange", "bybit")
+    ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
+
     if text == "📈 Price Spike":
-        temp_configs[tid] = {"type": "price_spike"}
+        temp_configs[tid]["type"] = "price_spike"
         await update.message.reply_text(
-            "📈 *Price Spike Screener*\n\n"
-            "Введи минимальный процент изменения цены для сигнала.\n"
-            "Например: `5` — сигнал при изменении на 5% и более за выбранный интервал.",
+            f"📈 *Price Spike* {ex_emoji}\n\n"
+            f"Введи минимальный процент изменения цены для сигнала.\n"
+            f"Например: `5` — сигнал при изменении на 5% и более.",
             reply_markup=back_to_main_keyboard(),
             parse_mode="Markdown"
         )
         return PRICE_SPIKE_THRESHOLD
 
     elif text == "📖 Order Book Walls":
-        temp_configs[tid] = {"type": "orderbook"}
+        temp_configs[tid]["type"] = "orderbook"
         await update.message.reply_text(
-            "📖 *Order Book Walls Screener*\n\n"
-            "Введи минимальный размер заявки в USDT.\n"
-            "Например: `500000` — искать заявки от 500 тысяч USDT и выше.",
+            f"📖 *Order Book Walls* {ex_emoji}\n\n"
+            f"Введи минимальный размер заявки в USDT.\n"
+            f"Например: `500000` — искать заявки от 500K USDT.",
             reply_markup=back_to_main_keyboard(),
             parse_mode="Markdown"
         )
         return ORDERBOOK_MIN_SIZE
 
     elif text == "💰 Funding Rate":
-        temp_configs[tid] = {"type": "funding_rate"}
+        temp_configs[tid]["type"] = "funding_rate"
         await update.message.reply_text(
-            "💰 *Funding Rate Screener*\n\n"
-            "Введи минимальную ставку фандинга для сигнала (в процентах).\n"
-            "Например: `0.1` — сигнал при ставке ≥ 0.1%\n\n"
-            "Обычно >0.1% считается высоким. Проверка каждые 5 минут.",
+            f"💰 *Funding Rate* {ex_emoji}\n\n"
+            f"Введи минимальную ставку фандинга для сигнала (в процентах).\n"
+            f"Например: `0.1` — сигнал при ставке ≥ 0.1%\n\n"
+            f"Обычно >0.1% считается высоким. Проверка каждые 5 минут.",
             reply_markup=back_to_main_keyboard(),
             parse_mode="Markdown"
         )
@@ -444,7 +456,7 @@ async def choose_screener_handler(update: Update, context: ContextTypes.DEFAULT_
         return CHOOSE_SCREENER
 
 
-#пампы дампы
+#price spike
 
 async def price_spike_threshold_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -480,8 +492,10 @@ async def price_spike_interval_handler(update: Update, context: ContextTypes.DEF
         return PRICE_SPIKE_INTERVAL
     temp_configs[tid]["interval"] = interval
     cfg = temp_configs[tid]
+    exchange = cfg.get("exchange", "bybit")
+    ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
     await update.message.reply_text(
-        f"📈 *Price Spike Screener*\n\n"
+        f"📈 *Price Spike* {ex_emoji} *{exchange.capitalize()}*\n\n"
         f"Порог изменения: *{cfg['threshold']}%*\n"
         f"Интервал свечи: *{text}*\n\n"
         f"Что делаем?",
@@ -491,7 +505,7 @@ async def price_spike_interval_handler(update: Update, context: ContextTypes.DEF
     return SAVE_OR_RUN
 
 
-#заявки на споте
+#order book walls
 
 async def orderbook_min_size_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -509,9 +523,9 @@ async def orderbook_min_size_handler(update: Update, context: ContextTypes.DEFAU
     temp_configs[tid]["min_size_usdt"] = val
     size_label = f"{val / 1_000_000:.1f}M" if val >= 1_000_000 else f"{val / 1_000:.0f}K"
     await update.message.reply_text(
-        f"✅ Минимальный размер заявки: *{size_label} USDT*\n\n"
+        f"✅ Минимальный размер: *{size_label} USDT*\n\n"
         f"Введи максимальное расстояние от текущей цены до заявки в процентах.\n"
-        f"Например: `2` — искать заявки в пределах 2% от текущей цены.",
+        f"Например: `2` — заявки в пределах 2% от текущей цены.",
         reply_markup=back_to_main_keyboard(),
         parse_mode="Markdown"
     )
@@ -535,8 +549,10 @@ async def orderbook_distance_handler(update: Update, context: ContextTypes.DEFAU
     cfg = temp_configs[tid]
     min_usdt = cfg["min_size_usdt"]
     size_label = f"{min_usdt / 1_000_000:.1f}M" if min_usdt >= 1_000_000 else f"{min_usdt / 1_000:.0f}K"
+    exchange = cfg.get("exchange", "bybit")
+    ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
     await update.message.reply_text(
-        f"📖 *Order Book Walls Screener*\n\n"
+        f"📖 *Order Book Walls* {ex_emoji} *{exchange.capitalize()}*\n\n"
         f"Минимальный размер заявки: *{size_label} USDT*\n"
         f"Максимальное расстояние: *{val}%*\n"
         f"Проверка каждые 60 секунд\n\n"
@@ -564,8 +580,10 @@ async def funding_threshold_handler(update: Update, context: ContextTypes.DEFAUL
         return FUNDING_THRESHOLD
     temp_configs[tid]["threshold"] = val / 100
     temp_configs[tid]["threshold_display"] = val
+    exchange = temp_configs[tid].get("exchange", "bybit")
+    ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
     await update.message.reply_text(
-        f"💰 *Funding Rate Screener*\n\n"
+        f"💰 *Funding Rate* {ex_emoji} *{exchange.capitalize()}*\n\n"
         f"Минимальная ставка: *{val}%*\n"
         f"Проверка каждые 5 минут\n\n"
         f"Что делаем?",
@@ -575,7 +593,7 @@ async def funding_threshold_handler(update: Update, context: ContextTypes.DEFAUL
     return SAVE_OR_RUN
 
 
-# cохранение / запуск
+#сохранение запуск
 
 async def save_or_run_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -585,11 +603,14 @@ async def save_or_run_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return MAIN_MENU
     if text == "▶️ Запустить без сохранения":
         await launch_screener(tid, context, update.message.chat_id)
-        stype = temp_configs.get(tid, {}).get("type", "")
+        cfg = temp_configs.get(tid, {})
+        stype = cfg.get("type", "")
+        exchange = cfg.get("exchange", "bybit")
         emoji = SCREENER_EMOJI.get(stype, "")
         name = SCREENER_NAMES.get(stype, "")
+        ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
         await update.message.reply_text(
-            f"✅ {emoji} *{name}* запущен!\n\n"
+            f"✅ {emoji} *{name}* {ex_emoji} *{exchange.capitalize()}* запущен!\n\n"
             f"Управляй скринерами через *📊 Активные скринеры*.",
             reply_markup=main_menu_keyboard(),
             parse_mode="Markdown"
@@ -597,7 +618,7 @@ async def save_or_run_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return MAIN_MENU
     elif text == "💾 Сохранить и запустить":
         await update.message.reply_text(
-            "💾 Введи название для этого конфига:\nНапример: `BTC стакан 1M` или `Памп 5%`",
+            "💾 Введи название для этого конфига:\nНапример: `BTC стакан Bybit` или `Памп 5% Bitget`",
             reply_markup=back_to_main_keyboard(),
             parse_mode="Markdown"
         )
@@ -625,17 +646,20 @@ async def save_config_name_handler(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text(f"✅ Конфиг *{text}* сохранён!", parse_mode="Markdown")
     await launch_screener(tid, context, update.message.chat_id)
     stype = cfg.get("type", "")
+    exchange = cfg.get("exchange", "bybit")
     emoji = SCREENER_EMOJI.get(stype, "")
     name = SCREENER_NAMES.get(stype, "")
+    ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
     await update.message.reply_text(
-        f"▶️ {emoji} *{name}* запущен!\n\nУправляй скринерами через *📊 Активные скринеры*.",
+        f"▶️ {emoji} *{name}* {ex_emoji} *{exchange.capitalize()}* запущен!\n\n"
+        f"Управляй скринерами через *📊 Активные скринеры*.",
         reply_markup=main_menu_keyboard(),
         parse_mode="Markdown"
     )
     return MAIN_MENU
 
 
-# мои конфиги
+#мои конфиги
 
 async def show_my_configs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -643,7 +667,6 @@ async def show_my_configs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_db_id:
         await update.message.reply_text("⚠️ Сначала войди в аккаунт.", reply_markup=auth_keyboard())
         return AUTH_CHOOSE
-    # запрос в бд
     all_configs = await asyncio.to_thread(db_get_configs, user_db_id)
     if not all_configs:
         await update.message.reply_text(
@@ -653,12 +676,12 @@ async def show_my_configs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return MAIN_MENU
-    short = [(cid, name, stype) for cid, name, stype, _ in all_configs]
-    full = {cid: params for cid, _, _, params in all_configs}
+    short = [(cid, name, stype, exchange) for cid, name, stype, exchange, _ in all_configs]
+    full = {cid: params for cid, _, _, _, params in all_configs}
     context.user_data["configs_short"] = short
     context.user_data["configs_full"] = full
     await update.message.reply_text(
-        "📋 *Твои конфиги:*\n\nНажми на конфиг чтобы запустить скринер с этими настройками.",
+        "📋 *Твои конфиги:*\n\nНажми на конфиг чтобы запустить скринер.",
         reply_markup=configs_inline_keyboard(short),
         parse_mode="Markdown"
     )
@@ -706,16 +729,60 @@ async def my_configs_callback_handler(update: Update, context: ContextTypes.DEFA
         temp_configs[tid] = params
         await launch_screener(tid, context, query.message.chat_id)
         stype = params.get("type", "")
+        exchange = params.get("exchange", "bybit")
         emoji = SCREENER_EMOJI.get(stype, "")
         name = SCREENER_NAMES.get(stype, "")
-        await query.edit_message_text(f"✅ Конфиг загружен!")
+        ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
+        await query.edit_message_text("✅ Конфиг загружен!")
         await context.bot.send_message(
             chat_id=query.message.chat_id,
-            text=f"▶️ {emoji} *{name}* запущен!\n\nУправляй скринерами через *📊 Активные скринеры*.",
+            text=f"▶️ {emoji} *{name}* {ex_emoji} *{exchange.capitalize()}* запущен!\n\n"
+                 f"Управляй скринерами через *📊 Активные скринеры*.",
             reply_markup=main_menu_keyboard(),
             parse_mode="Markdown"
         )
         return MAIN_MENU
+
+
+#управление активными скринерами
+
+async def manage_screeners_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    tid = update.effective_user.id
+    data = query.data
+
+    if data == "noop":
+        return MANAGE_SCREENERS
+
+    if data == "close_manage":
+        await query.delete_message()
+        return MAIN_MENU
+
+    if data == "stop_all":
+        stop_all_screeners(tid)
+        await query.edit_message_text(
+            "🛑 *Все скринеры остановлены.*",
+            reply_markup=manage_screeners_inline_keyboard({}),
+            parse_mode="Markdown"
+        )
+        return MANAGE_SCREENERS
+
+    if data.startswith("stop_"):
+        screener_type = data.replace("stop_", "")
+        stop_one_screener(tid, screener_type)
+        emoji = SCREENER_EMOJI.get(screener_type, "")
+        name = SCREENER_NAMES.get(screener_type, screener_type)
+        jobs = get_user_jobs(tid)
+        status_text = build_active_status_text(tid)
+        await query.edit_message_text(
+            f"🛑 {emoji} *{name}* остановлен.\n\n{status_text}",
+            reply_markup=manage_screeners_inline_keyboard(jobs),
+            parse_mode="Markdown"
+        )
+        return MANAGE_SCREENERS
+
+    return MANAGE_SCREENERS
 
 
 #запуск скринера
@@ -744,7 +811,12 @@ async def launch_screener(telegram_id: int, context: ContextTypes.DEFAULT_TYPE, 
 
     if telegram_id not in active_jobs:
         active_jobs[telegram_id] = {}
-    active_jobs[telegram_id][screener_type] = job
+
+    active_jobs[telegram_id][screener_type] = {
+        "job": job,
+        "exchange": cfg.get("exchange", "bybit")
+    }
+
 
 
 async def screener_job(context: ContextTypes.DEFAULT_TYPE):
@@ -753,54 +825,49 @@ async def screener_job(context: ContextTypes.DEFAULT_TYPE):
     cfg = job_data["config"]
     screener_type = cfg.get("type")
     tid = job_data["telegram_id"]
+    exchange = cfg.get("exchange", "bybit")
+    client = get_exchange_client(exchange)
+    ex_emoji = EXCHANGE_EMOJI.get(exchange, "")
+    ex_name = exchange.capitalize()
 
     try:
-        #price spike
         if screener_type == "price_spike":
             interval = cfg.get("interval", "5")
             interval_label = INTERVAL_LABELS.get(interval, f"{interval} мин")
-
             alerts = await asyncio.to_thread(
                 check_price_spike,
                 cfg.get("threshold", 5.0),
-                interval
+                interval,
+                client  # передаём клиент биржи
             )
-
             for a in alerts[:5]:
                 signal_line = "🟢 *PUMP*" if a["is_pump"] else "🔴 *DUMP*"
                 text = (
-                    f"📈 *PRICE SPIKE*\n"
+                    f"📈 *PRICE SPIKE* {ex_emoji} {ex_name}\n"
                     f"{signal_line} — *{a['pair']}*\n\n"
                     f"📊 Изменение: `{a['pct_change']:+.2f}%` за {interval_label}\n"
                     f"💰 Цена: `{a['price_from']}` → `{a['price_to']}`"
                 )
                 await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
-#order book walls
         elif screener_type == "orderbook":
-            # запрос к бирже — в отдельном потоке
             current_walls = await asyncio.to_thread(
                 fetch_orderbook_walls,
                 cfg.get("min_size_usdt", 500_000),
-                cfg.get("max_distance_pct", 2.0)
-            )
-
-
+                cfg.get("max_distance_pct", 2.0),
+                client)
             current_keys = set(current_walls.keys())
             known_keys = orderbook_known.get(tid, set())
             new_keys = current_keys - known_keys
-
-
             orderbook_known[tid] = current_keys
 
-            # отправляем только новые стены
             for key in list(new_keys)[:5]:
                 a = current_walls[key]
                 side_line = "🟩 *BID WALL* (поддержка)" if a["side"] == "BID" else "🟥 *ASK WALL* (сопротивление)"
                 usdt = a["size_usdt"]
                 size_label = f"{usdt / 1_000_000:.2f}M" if usdt >= 1_000_000 else f"{usdt / 1_000:.1f}K"
                 text = (
-                    f"📖 *ORDER BOOK*\n"
+                    f"📖 *ORDER BOOK* {ex_emoji} {ex_name}\n"
                     f"{side_line} — *{a['pair']}*\n\n"
                     f"💰 Текущая цена: `{a['current_price']}`\n"
                     f"🎯 Цена заявки: `{a['wall_price']}`\n"
@@ -809,16 +876,15 @@ async def screener_job(context: ContextTypes.DEFAULT_TYPE):
                 )
                 await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
-# funding rate
         elif screener_type == "funding_rate":
             alerts = await asyncio.to_thread(
                 check_funding_rate,
-                cfg.get("threshold", 0.001)
+                cfg.get("threshold", 0.001),
+                client  # передаём клиент биржи
             )
-
             for a in alerts[:5]:
                 text = (
-                    f"💰 *FUNDING RATE*\n"
+                    f"💰 *FUNDING RATE* {ex_emoji} {ex_name}\n"
                     f"*{a['pair']}*\n\n"
                     f"📈 Ставка: `{a['funding_rate_pct']:+.4f}%`\n"
                     f"ℹ️ {a['direction']}"
@@ -826,4 +892,4 @@ async def screener_job(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"ошибка в screener_job ({screener_type}): {e}")
+        logger.error(f"ошибка в screener_job ({screener_type}, {exchange}): {e}")
